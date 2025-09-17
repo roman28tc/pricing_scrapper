@@ -10,6 +10,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
+try:  # pragma: no cover - optional dependency that may not be installed in tests
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+except ImportError:  # pragma: no cover - keep fallback behaviour when Playwright is absent
+    sync_playwright = None
+    PlaywrightError = PlaywrightTimeoutError = Exception
+
 from pricing_scrapper.scraper import PriceResult, extract_prices
 
 USER_AGENT = (
@@ -17,11 +27,44 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
 )
 
+REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
+
 
 def fetch(url: str) -> str:
+    if sync_playwright is not None:
+        try:
+            return _fetch_with_playwright(url)
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            raise URLError(f"Playwright failed to fetch {url}: {exc}") from exc
+
+    return _fetch_with_urllib(url)
+
+
+def _fetch_with_urllib(url: str) -> str:
     request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request, timeout=20) as response:  # nosec B310 - controlled URL
-        return response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # nosec B310 - controlled URL
+        return response.read().decode(
+            response.headers.get_content_charset() or "utf-8", errors="replace"
+        )
+
+
+def _fetch_with_playwright(url: str) -> str:
+    assert sync_playwright is not None  # for type-checkers
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=USER_AGENT)
+        page = context.new_page()
+        try:
+            page.set_default_timeout(REQUEST_TIMEOUT_MS)
+            page.goto(url, wait_until="networkidle", timeout=REQUEST_TIMEOUT_MS)
+            html_content = page.content()
+        finally:
+            context.close()
+            browser.close()
+
+    return html_content
 
 
 def validate_url(value: str) -> str:
