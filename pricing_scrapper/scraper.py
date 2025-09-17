@@ -27,6 +27,9 @@ class PriceResult:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
 
 
 def _clean_snippet(snippet: str) -> str:
@@ -39,13 +42,15 @@ def _clean_snippet(snippet: str) -> str:
 def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
     """Extract probable prices from raw HTML and provide textual context."""
 
+    search_text = _SCRIPT_STYLE_RE.sub(" ", html_text)
+
     results: List[PriceResult] = []
     seen: set[tuple[str, str]] = set()
 
-    for match in PRICE_PATTERN.finditer(html_text):
+    for match in PRICE_PATTERN.finditer(search_text):
         start = max(match.start() - context, 0)
-        end = min(match.end() + context, len(html_text))
-        snippet = _clean_snippet(html_text[start:end])
+        end = min(match.end() + context, len(search_text))
+        snippet = _clean_snippet(search_text[start:end])
         price = match.group().strip()
 
         if not snippet:
@@ -66,6 +71,8 @@ def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
 def iter_prices(html_text: str) -> Iterable[str]:
     """Yield raw price strings from *html_text*."""
 
-    for match in PRICE_PATTERN.finditer(html_text):
+    search_text = _SCRIPT_STYLE_RE.sub(" ", html_text)
+
+    for match in PRICE_PATTERN.finditer(search_text):
         yield match.group().strip()
 
