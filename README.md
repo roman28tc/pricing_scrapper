@@ -5,20 +5,28 @@ available product listing page. Paste a URL into the form and the scraper
 attempts to identify text that looks like a price, along with a short snippet
 of surrounding context.
 
-The project relies only on the Python standard library so it works out of the
-box in restricted environments.
+JavaScript-heavy pages are rendered with [Playwright](https://playwright.dev),
+allowing the scraper to access prices that are inserted dynamically at
+runtime.
 
 ## Getting started
 
 1. (Optional) Create and activate a virtual environment using your preferred
    tooling.
-2. Run the development server:
+2. Install the dependencies and Playwright browser binary:
+
+   ```bash
+   pip install -r requirements.txt
+   playwright install chromium
+   ```
+
+3. Run the development server:
 
    ```bash
    python server.py
    ```
 
-3. Open `http://localhost:8000` in your browser and supply a page URL to
+4. Open `http://localhost:8000` in your browser and supply a page URL to
    scrape.
 
 ## Tests

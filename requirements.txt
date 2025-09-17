@@ -1,3 +1,5 @@
-# The application uses only Python's standard library at runtime.
-# Pytest is required for running the test suite and is already available in the environment.
+# Runtime dependency
+playwright>=1.41
+
+# Testing dependency
 pytest>=7.4
