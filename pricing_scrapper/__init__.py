@@ -1,0 +1,1 @@
+"""Pricing Scraper package."""
