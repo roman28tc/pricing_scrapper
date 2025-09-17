@@ -58,7 +58,13 @@ def _fetch_with_playwright(url: str) -> str:
         page = context.new_page()
         try:
             page.set_default_timeout(REQUEST_TIMEOUT_MS)
-            page.goto(url, wait_until="networkidle", timeout=REQUEST_TIMEOUT_MS)
+            page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state(
+                    "networkidle", timeout=max(REQUEST_TIMEOUT_MS // 2, 1)
+                )
+            except PlaywrightTimeoutError:
+                pass
             html_content = page.content()
         finally:
             context.close()
