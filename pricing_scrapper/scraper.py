@@ -43,6 +43,7 @@ def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
     """Extract probable prices from raw HTML and provide textual context."""
 
     search_text = _SCRIPT_STYLE_RE.sub(" ", html_text)
+    search_text = html.unescape(search_text)
 
     results: List[PriceResult] = []
     seen: set[tuple[str, str]] = set()
@@ -72,6 +73,7 @@ def iter_prices(html_text: str) -> Iterable[str]:
     """Yield raw price strings from *html_text*."""
 
     search_text = _SCRIPT_STYLE_RE.sub(" ", html_text)
+    search_text = html.unescape(search_text)
 
     for match in PRICE_PATTERN.finditer(search_text):
         yield match.group().strip()
