@@ -155,3 +155,21 @@ def test_extract_prices_removes_interface_noise_from_titles():
         descriptions["3 476 ₴"]
         == "Електропривод для ручних кавомолок Hario EMS-1B"
     )
+
+
+def test_extract_prices_skips_attribute_only_matches():
+    html = """
+    <div class="product-card"
+         data-product-id="123"
+         data-product-price="1 675 ₴"
+         data-product-name="Кавомолка Hario Skerton Plus">
+        <a class="name" href="/p123">Кавомолка Hario Skerton Plus</a>
+        <div class="price">1 675 ₴</div>
+    </div>
+    """
+
+    results = extract_prices(html)
+
+    assert results
+    assert [result.price for result in results] == ["1 675 ₴"]
+    assert results[0].description == "Кавомолка Hario Skerton Plus"
