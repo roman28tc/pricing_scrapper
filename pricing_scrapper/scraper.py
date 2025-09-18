@@ -32,6 +32,64 @@ _SCRIPT_STYLE_RE = re.compile(
 )
 
 
+def _gather_visible_text(
+    text: str, *, start: int, direction: int, limit: int
+) -> str:
+    """Return up to *limit* visible characters from *text*.
+
+    The function walks the string either backwards (``direction=-1``) or forwards
+    (``direction=1``) starting from *start* and skips over HTML tags so that the
+    returned snippet only contains text that would be rendered to the user.
+    """
+
+    assert direction in {-1, 1}
+
+    step = direction
+    idx = start
+    end = len(text)
+    buffer: list[str] = []
+    collected = 0
+    in_tag = False
+
+    while 0 <= idx < end and collected < limit:
+        char = text[idx]
+
+        if char == "<":
+            if direction == 1:
+                in_tag = True
+            else:
+                in_tag = False
+            idx += step
+            continue
+        if char == ">":
+            if direction == 1:
+                in_tag = False
+            else:
+                in_tag = True
+            idx += step
+            continue
+
+        if not in_tag:
+            if not buffer and char.isspace():
+                idx += step
+                continue
+            buffer.append(char)
+            collected += 1
+
+        idx += step
+
+    if direction == -1:
+        buffer.reverse()
+
+    return "".join(buffer)
+
+
+def _visible_text_window(text: str, start: int, end: int, context: int) -> str:
+    left = _gather_visible_text(text, start=start - 1, direction=-1, limit=context)
+    right = _gather_visible_text(text, start=end, direction=1, limit=context)
+    return f"{left}{text[start:end]}{right}"
+
+
 def _clean_snippet(snippet: str) -> str:
     text = _TAG_RE.sub(" ", snippet)
     text = html.unescape(text)
@@ -49,9 +107,14 @@ def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
     seen: set[tuple[str, str]] = set()
 
     for match in PRICE_PATTERN.finditer(search_text):
-        start = max(match.start() - context, 0)
-        end = min(match.end() + context, len(search_text))
-        snippet = _clean_snippet(search_text[start:end])
+        snippet = _clean_snippet(
+            _visible_text_window(
+                search_text,
+                max(match.start(), 0),
+                min(match.end(), len(search_text)),
+                context,
+            )
+        )
         price = match.group().strip()
 
         if not snippet:

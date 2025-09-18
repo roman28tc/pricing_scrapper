@@ -101,3 +101,26 @@ def test_iter_prices_skips_script_and_style_content():
     """
 
     assert list(iter_prices(html)) == ["€120,00"]
+
+
+def test_extract_prices_prefers_visible_text_over_markup():
+    html = """
+    <div class="b-product-gallery__item">
+        <a class="b-product-gallery__title" href="/p123-hario-v60">
+            Крапельна кава Hario V60-02, біла
+        </a>
+        <div class="b-product-gallery__price">
+            <span class="b-goods-price__value b-goods-price__value_type_current">
+                1 675 ₴
+            </span>
+            <span class="b-product-gallery__sku">Артикул 12345</span>
+        </div>
+    </div>
+    """
+
+    results = extract_prices(html)
+
+    assert results
+    assert results[0].price == "1 675 ₴"
+    assert "Hario V60-02" in results[0].description
+    assert "b-goods-price" not in results[0].description
