@@ -6,7 +6,9 @@ import html
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from typing import Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
+
+from urllib.parse import urldefrag, urljoin, urlparse
 
 
 @dataclass(slots=True)
@@ -372,4 +374,231 @@ def parse_category_products(html_text: str) -> List[Category]:
     parser.feed(html_text)
     parser.close()
     return parser.categories
+
+
+_NEXT_TEXT_SYMBOLS = {">", ">>", "»", "›", "→"}
+_NEXT_TEXT_KEYWORDS = {
+    "next",
+    "next page",
+    "следующая",
+    "следующая страница",
+    "вперед",
+    "вперёд",
+    "далее",
+    "далі",
+}
+_NEXT_ATTR_KEYWORDS = (
+    "next",
+    "pagination_next",
+    "pager_next",
+)
+_NEXT_CLASS_HINTS = (
+    "pagination__next",
+    "pagination-next",
+    "pagination_next",
+    "pager__next",
+    "pager-next",
+    "page__next",
+    "page-next",
+    "nav__next",
+    "nav-next",
+    "arrow-next",
+    "btn-next",
+)
+_PLACEHOLDER_CATEGORY_RE = re.compile(r"^Category \d+$")
+
+
+def _text_looks_like_next(text: str) -> bool:
+    if not text:
+        return False
+    normalized = text.strip()
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    if lowered in _NEXT_TEXT_KEYWORDS:
+        return True
+    if lowered.startswith("наступ"):
+        return True
+    if lowered.startswith("следующ"):
+        return True
+    if lowered.startswith("дал"):
+        return True
+    if lowered.startswith("далі"):
+        return True
+    if lowered.startswith("вперёд") or lowered.startswith("вперед"):
+        return True
+    if normalized in _NEXT_TEXT_SYMBOLS:
+        return True
+    return False
+
+
+def _split_classes(value: str) -> Iterable[str]:
+    return (part for part in re.split(r"\s+", value) if part)
+
+
+def _link_attrs_look_like_next(attrs: Dict[str, str]) -> bool:
+    href = attrs.get("href", "").strip()
+    if not href or href in {"#", "javascript:void(0)", "javascript:;", "void(0)"}:
+        return False
+
+    rel = attrs.get("rel")
+    if rel and any(part.casefold() == "next" for part in re.split(r"\s+", rel)):
+        return True
+
+    for key in ("data-qaid", "data-role", "data-action", "data-direction"):
+        value = attrs.get(key)
+        if value and any(keyword in value.casefold() for keyword in _NEXT_ATTR_KEYWORDS):
+            return True
+
+    aria_label = attrs.get("aria-label")
+    if aria_label and _text_looks_like_next(aria_label):
+        return True
+
+    title = attrs.get("title")
+    if title and _text_looks_like_next(title):
+        return True
+
+    classes = attrs.get("class")
+    if classes:
+        for cls in _split_classes(classes):
+            lowered = cls.casefold()
+            if lowered in _NEXT_CLASS_HINTS:
+                return True
+            if "next" in lowered and any(
+                hint in lowered for hint in ("pag", "pager", "page", "nav", "arrow")
+            ):
+                return True
+
+    return False
+
+
+class _PaginationParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.next_href: Optional[str] = None
+        self._current_anchor: Optional[Dict[str, str]] = None
+        self._anchor_depth = 0
+        self._buffer: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        if self.next_href is not None:
+            if tag == "a" and self._current_anchor is not None:
+                self._anchor_depth += 1
+            return
+
+        attrs_dict: Dict[str, str] = dict(attrs)
+
+        if tag == "link":
+            href = attrs_dict.get("href")
+            if href and _link_attrs_look_like_next(attrs_dict):
+                self.next_href = href
+            return
+
+        if tag != "a":
+            if self._current_anchor is not None:
+                self._anchor_depth += 1
+            return
+
+        href = attrs_dict.get("href")
+        if not href:
+            return
+
+        if _link_attrs_look_like_next(attrs_dict):
+            self.next_href = href
+            return
+
+        self._current_anchor = attrs_dict
+        self._buffer = []
+        self._anchor_depth = 0
+
+    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        if self._current_anchor is None:
+            return
+
+        if tag != "a":
+            if self._anchor_depth:
+                self._anchor_depth -= 1
+            return
+
+        if self._anchor_depth:
+            self._anchor_depth -= 1
+            return
+
+        href = self._current_anchor.get("href")
+        text = _normalize_text("".join(self._buffer))
+        if href and _text_looks_like_next(text):
+            self.next_href = href
+
+        self._current_anchor = None
+        self._buffer = []
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if self.next_href is not None:
+            return
+        if self._current_anchor is not None:
+            self._buffer.append(data)
+
+
+def _find_next_page_url(html_text: str, base_url: str) -> Optional[str]:
+    parser = _PaginationParser()
+    parser.feed(html_text)
+    parser.close()
+
+    href = parser.next_href
+    if not href:
+        return None
+
+    joined = urljoin(base_url, href)
+    if not joined:
+        return None
+
+    joined, _ = urldefrag(joined)
+    if not joined:
+        return None
+
+    parsed = urlparse(joined)
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        return None
+
+    return parsed._replace(fragment="").geturl()
+
+
+def scrape_category_products(
+    url: str, *, fetch: Callable[[str], str]
+) -> List[Category]:
+    """Fetch *url* and follow pagination links to collect all products."""
+
+    aggregated: Dict[str, Category] = {}
+    placeholder_counter = 0
+    ordered_keys: List[str] = []
+    seen_urls: set[str] = set()
+
+    next_url: Optional[str] = url
+
+    while next_url and next_url not in seen_urls:
+        seen_urls.add(next_url)
+        html_text = fetch(next_url)
+        page_categories = parse_category_products(html_text)
+
+        for category in page_categories:
+            if _PLACEHOLDER_CATEGORY_RE.match(category.name):
+                key = f"__placeholder_{placeholder_counter}"
+                placeholder_counter += 1
+            else:
+                key = category.name
+
+            existing = aggregated.get(key)
+            if existing is None:
+                aggregated[key] = Category(
+                    name=category.name, products=list(category.products)
+                )
+                ordered_keys.append(key)
+            else:
+                existing.products.extend(category.products)
+
+        next_url = _find_next_page_url(html_text, next_url)
+        if next_url in seen_urls:
+            break
+
+    return [aggregated[key] for key in ordered_keys]
 
