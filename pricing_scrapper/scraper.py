@@ -9,9 +9,9 @@ from typing import Iterable, List
 
 PRICE_PATTERN = re.compile(
     r"""
-    (?:(?:[$€£]|USD|EUR|GBP)\s?\d{1,3}(?:[\d.,\s]\d{3})*(?:[\d.,]\d{2})?)
+    (?:(?:[$€£₴]|USD|EUR|GBP|UAH)\s?\d{1,3}(?:[\d.,\s]\d{3})*(?:[\d.,]\d{2})?)
     |
-    (?:\d{1,3}(?:[\d.,\s]\d{3})*(?:[\d.,]\d{2})?\s?(?:USD|EUR|GBP))
+    (?:\d{1,3}(?:[\d.,\s]\d{3})*(?:[\d.,]\d{2})?\s?(?:USD|EUR|GBP|UAH|₴))
     """,
     re.IGNORECASE | re.VERBOSE,
 )

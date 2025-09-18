@@ -16,15 +16,16 @@ def test_price_pattern_matches_common_formats():
         "€99,95",
         "GBP 12.00",
         "1,299.00 USD",
+        "1 200 ₴",
     ]
     for sample in samples:
         assert PRICE_PATTERN.search(sample)
 
 
 def test_iter_prices_yields_matches():
-    html = "<span>$12.50</span><div>Now only €9,99 for a limited time!</div>"
+    html = "<span>$12.50</span><div>Now only €9,99 for a limited time!</div><p>Special 1 200 ₴ deal</p>"
     prices = list(iter_prices(html))
-    assert prices == ["$12.50", "€9,99"]
+    assert prices == ["$12.50", "€9,99", "1 200 ₴"]
 
 
 def test_extract_prices_returns_snippets():
@@ -33,12 +34,13 @@ def test_extract_prices_returns_snippets():
         <body>
             <div class="product">Widget A - $12.50 only today!</div>
             <div class="product">Widget B - €9,99 only today!</div>
+            <div class="product">Widget C - 1 200 ₴ only today!</div>
         </body>
     </html>
     """
 
     results = extract_prices(html)
-    assert [r.price for r in results] == ["$12.50", "€9,99"]
+    assert [r.price for r in results] == ["$12.50", "€9,99", "1 200 ₴"]
     assert all(isinstance(result, PriceResult) for result in results)
     assert any("Widget A" in result.description for result in results)
 
