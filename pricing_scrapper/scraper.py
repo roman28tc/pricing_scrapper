@@ -180,6 +180,18 @@ def _gather_visible_text(
     return "".join(buffer)
 
 
+def _is_inside_html_tag(text: str, index: int) -> bool:
+    """Return ``True`` if *index* is positioned within an HTML tag."""
+
+    lt_index = text.rfind("<", 0, index)
+    if lt_index == -1:
+        return False
+    gt_index = text.rfind(">", 0, index)
+    if gt_index > lt_index:
+        return False
+    return True
+
+
 def _visible_text_window(text: str, start: int, end: int, context: int) -> str:
     left = _gather_visible_text(text, start=start - 1, direction=-1, limit=context)
     right = _gather_visible_text(text, start=end, direction=1, limit=context)
@@ -400,6 +412,8 @@ def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
     seen: set[tuple[str, str]] = set()
 
     for match in PRICE_PATTERN.finditer(search_text):
+        if _is_inside_html_tag(search_text, match.start()):
+            continue
         snippet = _clean_snippet(
             _visible_text_window(
                 search_text,
@@ -441,5 +455,7 @@ def iter_prices(html_text: str) -> Iterable[str]:
     search_text = html.unescape(search_text)
 
     for match in PRICE_PATTERN.finditer(search_text):
+        if _is_inside_html_tag(search_text, match.start()):
+            continue
         yield match.group().strip()
 
