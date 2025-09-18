@@ -124,3 +124,34 @@ def test_extract_prices_prefers_visible_text_over_markup():
     assert results[0].price == "1 675 ₴"
     assert "Hario V60-02" in results[0].description
     assert "b-goods-price" not in results[0].description
+
+
+def test_extract_prices_removes_interface_noise_from_titles():
+    html = """
+    <div class="controls">
+        <button>Галерея</button>
+        <button>Список</button>
+    </div>
+    <div class="product-card">
+        <a class="title">Кавомолка ручна Hario Coffee Mill DOME</a>
+        <div class="details">
+            <span class="price">1 675 ₴</span>
+            <span class="status">Готово до відправки Оптом і в роздріб</span>
+        </div>
+    </div>
+    <div class="product-card">
+        <span class="badge">роздріб</span>
+        <span class="action">Купити</span>
+        <div class="name">Електропривод для ручних кавомолок Hario EMS-1B</div>
+        <div class="price">3 476 ₴</div>
+    </div>
+    """
+
+    results = extract_prices(html)
+    descriptions = {result.price: result.description for result in results}
+
+    assert descriptions["1 675 ₴"] == "Кавомолка ручна Hario Coffee Mill DOME"
+    assert (
+        descriptions["3 476 ₴"]
+        == "Електропривод для ручних кавомолок Hario EMS-1B"
+    )
