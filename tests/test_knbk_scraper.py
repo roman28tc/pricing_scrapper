@@ -229,3 +229,72 @@ def test_scrape_category_products_follows_pagination():
         ),
     ]
 
+
+def test_scrape_category_products_uses_data_url_when_href_placeholder():
+    page_1 = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Турки</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/t1">Турка 1</a>
+              <span class="b-goods-price__value">300 ₴</span>
+            </div>
+          </div>
+        </section>
+        <nav class="pagination">
+          <a data-qaid="pagination_next" href="#" data-url="?page=2">Далі</a>
+        </nav>
+      </body>
+    </html>
+    """
+
+    page_2 = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Турки</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/t2">Турка 2</a>
+              <span class="b-goods-price__value">350 ₴</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+
+    pages = {
+        "https://example.com/cat/": page_1,
+        "https://example.com/cat/?page=2": page_2,
+    }
+
+    visited: list[str] = []
+
+    def fake_fetch(url: str) -> str:
+        visited.append(url)
+        return pages[url]
+
+    categories = scrape_category_products("https://example.com/cat/", fetch=fake_fetch)
+
+    assert visited == [
+        "https://example.com/cat/",
+        "https://example.com/cat/?page=2",
+    ]
+
+    assert categories == [
+        Category(
+            name="Турки",
+            products=[
+                Product(name="Турка 1", price="300 ₴", url="/t1"),
+                Product(name="Турка 2", price="350 ₴", url="/t2"),
+            ],
+        )
+    ]
+

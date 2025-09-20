@@ -436,107 +436,154 @@ def _split_classes(value: str) -> Iterable[str]:
     return (part for part in re.split(r"\s+", value) if part)
 
 
-def _link_attrs_look_like_next(attrs: Dict[str, str]) -> bool:
-    href = attrs.get("href", "").strip()
-    if not href or href in {"#", "javascript:void(0)", "javascript:;", "void(0)"}:
-        return False
+_DATA_LINK_ATTRIBUTE_CANDIDATES = (
+    "data-url",
+    "data-href",
+    "data-link",
+    "data-next-url",
+    "data-next-href",
+    "data-target-url",
+    "data-page-url",
+    "data-page-link",
+)
+
+
+def _is_placeholder_href(value: str) -> bool:
+    normalized = value.strip()
+    if not normalized:
+        return True
+    lowered = normalized.casefold()
+    if lowered == "#":
+        return True
+    if lowered.startswith("javascript:"):
+        return True
+    if lowered in {"void(0)", "void(0);"}:
+        return True
+    return False
+
+
+def _extract_href_candidate(attrs: Dict[str, str]) -> Optional[str]:
+    href = attrs.get("href")
+    if href and not _is_placeholder_href(href):
+        return href.strip()
+
+    for key in _DATA_LINK_ATTRIBUTE_CANDIDATES:
+        candidate = attrs.get(key)
+        if candidate and not _is_placeholder_href(candidate):
+            stripped = candidate.strip()
+            if stripped:
+                return stripped
+
+    return None
+
+
+def _link_attrs_next_href(attrs: Dict[str, str]) -> Optional[str]:
+    href = _extract_href_candidate(attrs)
+    if not href:
+        return None
 
     rel = attrs.get("rel")
     if rel and any(part.casefold() == "next" for part in re.split(r"\s+", rel)):
-        return True
+        return href
 
     for key in ("data-qaid", "data-role", "data-action", "data-direction"):
         value = attrs.get(key)
         if value and any(keyword in value.casefold() for keyword in _NEXT_ATTR_KEYWORDS):
-            return True
+            return href
 
     aria_label = attrs.get("aria-label")
     if aria_label and _text_looks_like_next(aria_label):
-        return True
+        return href
 
     title = attrs.get("title")
     if title and _text_looks_like_next(title):
-        return True
+        return href
 
     classes = attrs.get("class")
     if classes:
         for cls in _split_classes(classes):
             lowered = cls.casefold()
             if lowered in _NEXT_CLASS_HINTS:
-                return True
+                return href
             if "next" in lowered and any(
-                hint in lowered for hint in ("pag", "pager", "page", "nav", "arrow")
+                hint in lowered for hint in ("pag", "pager", "page", "nav", "arrow", "btn")
             ):
-                return True
+                return href
 
-    return False
+    return None
 
 
 class _PaginationParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.next_href: Optional[str] = None
-        self._current_anchor: Optional[Dict[str, str]] = None
-        self._anchor_depth = 0
+        self._current_candidate_tag: Optional[str] = None
+        self._current_candidate_href: Optional[str] = None
+        self._candidate_depth = 0
         self._buffer: List[str] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
         if self.next_href is not None:
-            if tag == "a" and self._current_anchor is not None:
-                self._anchor_depth += 1
             return
 
         attrs_dict: Dict[str, str] = dict(attrs)
 
-        if tag == "link":
-            href = attrs_dict.get("href")
-            if href and _link_attrs_look_like_next(attrs_dict):
-                self.next_href = href
+        if tag in {"link", "a", "button"}:
+            next_href = _link_attrs_next_href(attrs_dict)
+            if next_href:
+                self.next_href = next_href
+                self._reset_candidate()
+                return
+
+        if tag in {"a", "button"}:
+            href_candidate = _extract_href_candidate(attrs_dict)
+            if href_candidate:
+                self._current_candidate_tag = tag
+                self._current_candidate_href = href_candidate
+                self._buffer = []
+                self._candidate_depth = 0
+            elif self._current_candidate_tag is not None:
+                self._candidate_depth += 1
             return
 
-        if tag != "a":
-            if self._current_anchor is not None:
-                self._anchor_depth += 1
-            return
-
-        href = attrs_dict.get("href")
-        if not href:
-            return
-
-        if _link_attrs_look_like_next(attrs_dict):
-            self.next_href = href
-            return
-
-        self._current_anchor = attrs_dict
-        self._buffer = []
-        self._anchor_depth = 0
+        if self._current_candidate_tag is not None:
+            self._candidate_depth += 1
 
     def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
-        if self._current_anchor is None:
+        if self._current_candidate_tag is None:
             return
 
-        if tag != "a":
-            if self._anchor_depth:
-                self._anchor_depth -= 1
+        if tag != self._current_candidate_tag:
+            if self._candidate_depth:
+                self._candidate_depth -= 1
             return
 
-        if self._anchor_depth:
-            self._anchor_depth -= 1
+        if self._candidate_depth:
+            self._candidate_depth -= 1
             return
 
-        href = self._current_anchor.get("href")
+        href = self._current_candidate_href
         text = _normalize_text("".join(self._buffer))
         if href and _text_looks_like_next(text):
             self.next_href = href
 
-        self._current_anchor = None
-        self._buffer = []
+        self._reset_candidate()
+
+    def handle_startendtag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_data(self, data: str) -> None:  # type: ignore[override]
         if self.next_href is not None:
             return
-        if self._current_anchor is not None:
+        if self._current_candidate_tag is not None:
             self._buffer.append(data)
+
+    def _reset_candidate(self) -> None:
+        self._current_candidate_tag = None
+        self._current_candidate_href = None
+        self._candidate_depth = 0
+        self._buffer = []
 
 
 def _find_next_page_url(html_text: str, base_url: str) -> Optional[str]:
