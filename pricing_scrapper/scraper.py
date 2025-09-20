@@ -25,6 +25,7 @@ class PriceResult:
 
     description: str
     price: str
+    availability: Optional[str] = None
 
 
 @dataclass
@@ -125,6 +126,56 @@ _NOISE_PREFIXES = tuple(
 _NOISE_PREFIX_RE = re.compile(
     r"^(?:" + "|".join(re.escape(prefix) for prefix in _NOISE_PREFIXES) + r")",
     re.IGNORECASE,
+)
+
+
+def _compile_availability_markers(
+    markers: Sequence[tuple[str, Optional[str]]]
+) -> tuple[tuple[re.Pattern[str], Optional[str]], ...]:
+    compiled: list[tuple[re.Pattern[str], Optional[str]]] = []
+    for pattern, label in markers:
+        compiled.append((re.compile(pattern, re.IGNORECASE), label))
+    return tuple(compiled)
+
+
+_AVAILABILITY_OUT_OF_STOCK_MARKERS = _compile_availability_markers(
+    (
+        (r"нема(?:є)?\s+в\s+наявн\w*", "Немає в наявності"),
+        (r"нема(?:є)?\s+на\s+склад\w*", "Немає на складі"),
+        (r"нет\s+в\s+налич\w*", "Нет в наличии"),
+        (r"нет\s+на\s+склад[еe]\w*", "Нет на складе"),
+        (r"наявн(?:ість|iсть)\s*:\s*нема(?:є)?", "Немає в наявності"),
+        (r"наличие\s*:\s*нет", "Нет в наличии"),
+        (r"відсут\w*", None),
+        (r"отсутств\w*", None),
+        (r"закінч\w*", None),
+        (r"законч\w*", None),
+        (r"під\s+замовлен\w*", "Під замовлення"),
+        (r"под\s+заказ", "Под заказ"),
+        (r"очікуєт\w*", "Очікується"),
+        (r"ожидает\w*", "Ожидается"),
+        (r"sold\s*out", "Sold out"),
+        (r"out\s+of\s+stock", "Out of stock"),
+    )
+)
+
+_AVAILABILITY_IN_STOCK_MARKERS = _compile_availability_markers(
+    (
+        (r"в\s+наявн\w*", "В наявності"),
+        (r"у\s+наявн\w*", "В наявності"),
+        (r"є\s+в\s+наявн\w*", "В наявності"),
+        (r"є\s+у\s+наявн\w*", "В наявності"),
+        (r"наявн(?:ість|iсть)\s*:\s*є", "В наявності"),
+        (r"наличие\s*:\s*есть", "В наличии"),
+        (r"є\s+на\s+склад\w*", "Є на складі"),
+        (r"есть\s+на\s+склад[еe]\w*", "Есть на складе"),
+        (r"в\s+налич\w*", "В наличии"),
+        (r"есть\s+в\s+налич\w*", "В наличии"),
+        (r"готово?\s+до\s+відправк\w*", "Готово до відправки"),
+        (r"готово?\s+к\s+отправк\w*", "Готов к отправке"),
+        (r"готов\s+до\s+відправк\w*", "Готово до відправки"),
+        (r"готов\s+к\s+отправк\w*", "Готов к отправке"),
+    )
 )
 
 
@@ -374,6 +425,96 @@ def _locate_node_for_price(
     return None
 
 
+def _normalize_availability_value(value: str) -> str:
+    value = _WHITESPACE_RE.sub(" ", value)
+    return value.strip(" :.,;-–—")
+
+
+def _match_availability_patterns(
+    text: str, patterns: Sequence[tuple[re.Pattern[str], Optional[str]]]
+) -> Optional[str]:
+    for pattern, label in patterns:
+        match = pattern.search(text)
+        if match:
+            matched = label if label is not None else match.group(0)
+            return _normalize_availability_value(matched)
+    return None
+
+
+def _collect_availability_texts(
+    nodes: Sequence[_TextNode],
+    price_index: Optional[int],
+    snippet: str,
+    description: Optional[str],
+) -> tuple[list[str], list[str]]:
+    primary: list[str] = []
+    fallback: list[str] = []
+    seen_primary: set[str] = set()
+    seen_fallback: set[str] = set()
+
+    def add(target: list[str], seen: set[str], text: Optional[str]) -> None:
+        if not text:
+            return
+        normalized = _WHITESPACE_RE.sub(" ", text).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        target.append(normalized)
+
+    add(primary, seen_primary, description)
+
+    if price_index is not None:
+        price_path = nodes[price_index].path
+        min_prefix = max(1, len(price_path) - 1) if price_path else 1
+        start = max(0, price_index - 3)
+        end = min(len(nodes), price_index + 4)
+        for idx in range(start, end):
+            candidate_node = nodes[idx]
+            if _common_prefix_length(candidate_node.path, price_path) < min_prefix:
+                continue
+            add(primary, seen_primary, candidate_node.text)
+
+    add(fallback, seen_fallback, snippet)
+
+    return primary, fallback
+
+
+def _detect_availability(
+    nodes: Sequence[_TextNode],
+    price_index: Optional[int],
+    snippet: str,
+    description: Optional[str],
+) -> Optional[str]:
+    if not nodes and not snippet and not description:
+        return None
+
+    primary, fallback = _collect_availability_texts(nodes, price_index, snippet, description)
+    if not primary and not fallback:
+        return None
+
+    for text in primary:
+        result = _match_availability_patterns(text, _AVAILABILITY_OUT_OF_STOCK_MARKERS)
+        if result:
+            return result
+
+    for text in primary:
+        result = _match_availability_patterns(text, _AVAILABILITY_IN_STOCK_MARKERS)
+        if result:
+            return result
+
+    for text in fallback:
+        result = _match_availability_patterns(text, _AVAILABILITY_OUT_OF_STOCK_MARKERS)
+        if result:
+            return result
+
+    for text in fallback:
+        result = _match_availability_patterns(text, _AVAILABILITY_IN_STOCK_MARKERS)
+        if result:
+            return result
+
+    return None
+
+
 def _refine_snippet(snippet: str, price: str) -> str:
     if not snippet:
         return snippet
@@ -439,11 +580,15 @@ def extract_prices(html_text: str, *, context: int = 60) -> List[PriceResult]:
         if len(description) > 160:
             description = f"{description[:157]}..."
 
+        availability = _detect_availability(nodes, node_index, snippet, description)
+
         key = (description, price)
         if key in seen:
             continue
         seen.add(key)
-        results.append(PriceResult(description=description, price=price))
+        results.append(
+            PriceResult(description=description, price=price, availability=availability)
+        )
 
     return results
 

@@ -64,6 +64,7 @@ def test_extract_prices_returns_snippets():
     ]
     assert all(isinstance(result, PriceResult) for result in results)
     assert any("Widget A" in result.description for result in results)
+    assert all(result.availability is None for result in results)
 
 
 def test_extract_prices_ignores_script_and_style_content():
@@ -155,6 +156,33 @@ def test_extract_prices_removes_interface_noise_from_titles():
         descriptions["3 476 ₴"]
         == "Електропривод для ручних кавомолок Hario EMS-1B"
     )
+
+
+def test_extract_prices_detects_availability_status():
+    html_text = """
+    <div class="product">
+        <span class="name">Кавомолка</span>
+        <span class="status">В наявності</span>
+        <span class="price">1 675 ₴</span>
+    </div>
+    <div class="product">
+        <span class="name">Еспресо машина</span>
+        <span class="status">Немає в наявності</span>
+        <span class="price">25 000 ₴</span>
+    </div>
+    <div class="product">
+        <span class="name">Кавомолка-друг</span>
+        <span class="meta">Наявність: немає</span>
+        <span class="price">3 000 ₴</span>
+    </div>
+    """
+
+    results = extract_prices(html_text)
+    availability = {result.price: result.availability for result in results}
+
+    assert availability["1 675 ₴"] == "В наявності"
+    assert availability["25 000 ₴"] == "Немає в наявності"
+    assert availability["3 000 ₴"] == "Немає в наявності"
 
 
 def test_extract_prices_skips_attribute_only_matches():

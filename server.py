@@ -323,13 +323,14 @@ def render_page(
     if results:
         for item in results:
             rows += (
-                "<tr><td>{description}</td><td>{price}</td></tr>".format(
+                "<tr><td>{description}</td><td>{price}</td><td>{availability}</td></tr>".format(
                     description=html.escape(item.description),
                     price=html.escape(item.price),
+                    availability=html.escape(item.availability) if item.availability else "",
                 )
             )
     elif results is not None:
-        rows = '<tr><td colspan="2">No prices were detected on the page.</td></tr>'
+        rows = '<tr><td colspan="3">No prices were detected on the page.</td></tr>'
 
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     summary_html = f'<p class="summary">{html.escape(summary)}</p>' if summary else ""
@@ -401,7 +402,7 @@ def render_page(
         {summary_html}
         <table>
           <thead>
-            <tr><th>Description</th><th>Price</th></tr>
+            <tr><th>Description</th><th>Price</th><th>Availability</th></tr>
           </thead>
           <tbody>
             {rows}
