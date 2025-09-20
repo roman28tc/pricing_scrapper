@@ -208,224 +208,40 @@ def _discover_pagination_urls(html_text: str, page_url: str) -> list[str]:
     return discovered
 
 
-def _collect_paginated_pages(
-    start_url: str,
-    *,
-    limit: int = MAX_PAGINATION_PAGES,
-    initial_html: str | None = None,
-    visited: set[str] | None = None,
-) -> list[tuple[str, str]]:
-    """Collect pages reachable via pagination starting from *start_url*.
-
-    Parameters
-    ----------
-    start_url:
-        URL of the first page in the pagination chain.
-    limit:
-        Maximum number of pages to collect during this call.
-    initial_html:
-        Optional HTML content for ``start_url``. When provided the function
-        avoids refetching the first page.
-    visited:
-        Optional set of already visited page URLs (normalized). When provided
-        it will be updated in-place with any new pages collected.
-    """
-
-    queue: deque[tuple[str, str | None]] = deque([(start_url, initial_html)])
+def _collect_paginated_pages(start_url: str, *, limit: int = MAX_PAGINATION_PAGES) -> list[tuple[str, str]]:
+    queue: deque[str] = deque([start_url])
     queued: set[str] = {_normalize_url(start_url)}
-    if visited is None:
-        visited = set()
+    visited: set[str] = set()
     pages: list[tuple[str, str]] = []
 
-    while queue and len(pages) < limit:
-        current, current_html = queue.popleft()
+    while queue and len(visited) < limit:
+        current = queue.popleft()
         normalized_current = _normalize_url(current)
         queued.discard(normalized_current)
         if normalized_current in visited:
             continue
 
-        html_text = current_html if current_html is not None else fetch(current)
+        html_text = fetch(current)
         pages.append((current, html_text))
         visited.add(normalized_current)
 
-        if len(pages) >= limit:
+        if len(visited) >= limit:
             continue
 
         for candidate in _discover_pagination_urls(html_text, current):
             normalized_candidate = _normalize_url(candidate)
             if normalized_candidate in visited or normalized_candidate in queued:
                 continue
-            if len(pages) + len(queue) >= limit:
+            if len(visited) + len(queued) >= limit:
                 continue
-            queue.append((candidate, None))
+            queue.append(candidate)
             queued.add(normalized_candidate)
 
     return pages
 
 
-_CATEGORY_ATTR_HINT_KEYWORDS = (
-    "category",
-    "subcategory",
-    "catalog",
-    "section",
-    "department",
-    "group",
-)
-
-_CATEGORY_ATTR_EXCLUDE_KEYWORDS = (
-    "product",
-    "item",
-    "price",
-    "cart",
-    "wishlist",
-    "compare",
-    "filter",
-)
-
-_CATEGORY_HREF_HINT_KEYWORDS = (
-    "/cat",
-    "/category",
-    "/catalog",
-    "/collections",
-    "category/",
-    "catalog/",
-    "collection/",
-)
-
-
-def _looks_like_category_link(link: _PaginationLink) -> bool:
-    text = link.text.strip()
-    if not text:
-        return False
-
-    text_lower = text.casefold()
-    if text_lower in _PAGINATION_TEXT_HINTS or text_lower in _PAGINATION_ARROW_TEXTS:
-        return False
-
-    attr_values = " ".join(
-        link.attrs.get(name, "")
-        for name in (
-            "class",
-            "data-qaid",
-            "data-role",
-            "data-type",
-            "data-entity",
-            "data-category",
-            "data-testid",
-            "id",
-            "rel",
-            "aria-label",
-            "title",
-        )
-    ).casefold()
-
-    if any(keyword in attr_values for keyword in _CATEGORY_ATTR_EXCLUDE_KEYWORDS):
-        return False
-
-    if any(keyword in attr_values for keyword in _CATEGORY_ATTR_HINT_KEYWORDS):
-        return True
-
-    href_lower = link.href.casefold()
-    if any(marker in href_lower for marker in _PAGINATION_HREF_HINTS):
-        return False
-
-    if any(keyword in href_lower for keyword in _CATEGORY_HREF_HINT_KEYWORDS):
-        return True
-
-    if any(keyword in text_lower for keyword in _CATEGORY_ATTR_HINT_KEYWORDS):
-        return True
-
-    return False
-
-
-def _discover_category_links(html_text: str, page_url: str) -> list[str]:
-    parser = _PaginationLinkParser()
-    parser.feed(html_text)
-    parser.close()
-
-    base = urlsplit(page_url)
-    base_netloc = base.netloc.casefold()
-    base_scheme = base.scheme
-    base_normalized = _normalize_url(page_url)
-
-    discovered: list[str] = []
-    seen: set[str] = set()
-
-    for link in parser.links:
-        if not _looks_like_category_link(link):
-            continue
-        href = link.href.strip()
-        if not href or href.startswith("#"):
-            continue
-        absolute = urljoin(page_url, href)
-        parsed = urlsplit(absolute)
-        if parsed.scheme not in {"http", "https"}:
-            continue
-        if parsed.netloc.casefold() != base_netloc:
-            continue
-        if not parsed.scheme:
-            parsed = parsed._replace(scheme=base_scheme)
-        normalized = _normalize_url(urlunsplit(parsed))
-        if normalized == base_normalized:
-            continue
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        discovered.append(urlunsplit(parsed))
-
-    return discovered
-
-
-def _collect_product_pages(
-    start_url: str, *, limit: int = MAX_PAGINATION_PAGES
-) -> list[tuple[str, str]]:
-    """Collect product listing pages by traversing category hierarchies."""
-
-    stack: list[tuple[str, str | None]] = [(start_url, None)]
-    queued_categories: set[str] = {_normalize_url(start_url)}
-    visited_categories: set[str] = set()
-    visited_product_pages: set[str] = set()
-    pages: list[tuple[str, str]] = []
-
-    while stack and len(pages) < limit:
-        current_url, initial_html = stack.pop()
-        normalized_current = _normalize_url(current_url)
-        queued_categories.discard(normalized_current)
-
-        if normalized_current in visited_categories:
-            continue
-
-        html_text = initial_html if initial_html is not None else fetch(current_url)
-
-        category_links = _discover_category_links(html_text, current_url)
-        if category_links:
-            visited_categories.add(normalized_current)
-            for link in reversed(category_links):
-                normalized_link = _normalize_url(link)
-                if normalized_link in visited_categories or normalized_link in queued_categories:
-                    continue
-                stack.append((link, None))
-                queued_categories.add(normalized_link)
-            continue
-
-        remaining = limit - len(pages)
-        if remaining <= 0:
-            break
-
-        new_pages = _collect_paginated_pages(
-            current_url,
-            limit=remaining,
-            initial_html=html_text,
-            visited=visited_product_pages,
-        )
-        pages.extend(new_pages)
-        visited_categories.add(normalized_current)
-
-    return pages
-
-
 def scrape_site(url: str, *, limit: int = MAX_PAGINATION_PAGES) -> tuple[list[PriceResult], int]:
-    pages = _collect_product_pages(url, limit=limit)
+    pages = _collect_paginated_pages(url, limit=limit)
     results: list[PriceResult] = []
     seen: set[tuple[str, str]] = set()
 
