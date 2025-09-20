@@ -214,6 +214,99 @@ def test_scrape_site_without_pagination(monkeypatch):
     assert {item.price for item in results} == {"$8.00"}
 
 
+def test_scrape_site_traverses_nested_categories(monkeypatch):
+    import importlib
+
+    server = importlib.reload(importlib.import_module("server"))
+
+    pages = {
+        "https://example.com/": """
+            <html>
+              <body>
+                <div class='category-grid'>
+                  <a class='category-card' data-qaid='category' href='/cat/a'>Category A</a>
+                  <a class='category-card' data-qaid='category' href='/cat/b'>Category B</a>
+                </div>
+              </body>
+            </html>
+        """,
+        "https://example.com/cat/a": """
+            <html>
+              <body>
+                <div class='subcategory-list'>
+                  <a class='subcategory-link' data-qaid='subcategory' href='/cat/a/coffee'>Coffee</a>
+                  <a class='subcategory-link' data-qaid='subcategory' href='/cat/a/tea'>Tea</a>
+                </div>
+              </body>
+            </html>
+        """,
+        "https://example.com/cat/a/coffee": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Coffee Grinder</span>
+                  <span class='price'>$20.00</span>
+                </div>
+                <nav class='pagination'>
+                  <a rel='next' class='pagination__next' href='/cat/a/coffee?page=2'>Next</a>
+                </nav>
+              </body>
+            </html>
+        """,
+        "https://example.com/cat/a/coffee?page=2": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Coffee Grinder Pro</span>
+                  <span class='price'>$21.50</span>
+                </div>
+              </body>
+            </html>
+        """,
+        "https://example.com/cat/a/tea": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Tea Kettle</span>
+                  <span class='price'>$15.00</span>
+                </div>
+              </body>
+            </html>
+        """,
+        "https://example.com/cat/b": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Espresso Machine</span>
+                  <span class='price'>$42.00</span>
+                </div>
+              </body>
+            </html>
+        """,
+    }
+
+    fetched: list[str] = []
+
+    def fake_fetch(url: str) -> str:
+        fetched.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(server, "fetch", fake_fetch)
+
+    results, page_count = server.scrape_site("https://example.com/")
+
+    assert page_count == 4
+    assert {item.price for item in results} == {"$20.00", "$21.50", "$15.00", "$42.00"}
+    assert fetched == [
+        "https://example.com/",
+        "https://example.com/cat/a",
+        "https://example.com/cat/a/coffee",
+        "https://example.com/cat/a/coffee?page=2",
+        "https://example.com/cat/a/tea",
+        "https://example.com/cat/b",
+    ]
+
+
 def test_format_summary():
     import importlib
 
