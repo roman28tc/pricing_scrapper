@@ -14,6 +14,7 @@ from pricing_scrapper.knbk import (
     Product,
     parse_category_products,
     scrape_category_products,
+    scrape_category_hierarchy_products,
 )
 
 
@@ -296,5 +297,183 @@ def test_scrape_category_products_uses_data_url_when_href_placeholder():
                 Product(name="Турка 2", price="350 ₴", url="/t2"),
             ],
         )
+    ]
+
+
+def test_scrape_category_hierarchy_products_traverses_nested_structure():
+    root_page = """
+    <html>
+      <body>
+        <section class="b-category-sections" data-qaid="category_groups">
+          <div class="b-category-sections__item">
+            <h2 class="b-category-sections__title">
+              <a class="b-category-sections__link" data-qaid="category_link" href="/ua/g1-coffee">
+                Coffee makers
+              </a>
+            </h2>
+          </div>
+          <div class="b-category-sections__item">
+            <h2 class="b-category-sections__title">
+              <a class="b-category-sections__link" href="/ua/g2-kettles">
+                Kettles
+              </a>
+            </h2>
+          </div>
+        </section>
+        <nav class="breadcrumbs">
+          <a class="breadcrumbs__link" href="/ua/">Home</a>
+          <a class="breadcrumbs__link" href="/ua/groot">Current</a>
+        </nav>
+        <footer class="footer">
+          <a class="footer__link" href="/ua/g999-ignore">Ignore me</a>
+        </footer>
+      </body>
+    </html>
+    """
+
+    coffee_page = """
+    <html>
+      <body>
+        <section class="catalog-section" data-qaid="category_groups">
+          <div class="catalog-section__item">
+            <a class="catalog-section__title" href="/ua/c10-manual">Manual grinders</a>
+          </div>
+          <div class="catalog-section__item">
+            <a class="catalog-section__title" data-qaid="category_link" href="/ua/c20-accessories">
+              Accessories
+            </a>
+          </div>
+        </section>
+        <div class="info-block">
+          <a class="info-block__link" href="/ua/p999">Not a category</a>
+        </div>
+      </body>
+    </html>
+    """
+
+    manual_page = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Manual grinders</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/p1">Hand Grinder A</a>
+              <span class="b-goods-price__value">100 ₴</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+
+    accessories_page = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Accessories</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/p2">Cleaning Brush</a>
+              <span class="b-goods-price__value">50 ₴</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+
+    kettles_page = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Electric kettles</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/p3">Kettle X</a>
+              <span class="b-goods-price__value">500 ₴</span>
+            </div>
+          </div>
+        </section>
+        <nav class="pagination">
+          <a class="pagination__next" href="?page=2">Next</a>
+        </nav>
+      </body>
+    </html>
+    """
+
+    kettles_page_2 = """
+    <html>
+      <body>
+        <section class="b-products-group" data-qaid="catalog_group">
+          <div class="b-products-group__header">
+            <h2 class="b-products-group__title">Electric kettles</h2>
+          </div>
+          <div class="b-products-group__body">
+            <div class="b-product-gallery__item" data-qaid="product_block">
+              <a class="b-product-gallery__title" href="/p4">Kettle Y</a>
+              <span class="b-goods-price__value">550 ₴</span>
+            </div>
+          </div>
+        </section>
+      </body>
+    </html>
+    """
+
+    pages = {
+        "https://example.com/ua/groot": root_page,
+        "https://example.com/ua/g1-coffee": coffee_page,
+        "https://example.com/ua/c10-manual": manual_page,
+        "https://example.com/ua/c20-accessories": accessories_page,
+        "https://example.com/ua/g2-kettles": kettles_page,
+        "https://example.com/ua/g2-kettles?page=2": kettles_page_2,
+    }
+
+    visited: list[str] = []
+
+    def fake_fetch(url: str) -> str:
+        visited.append(url)
+        return pages[url]
+
+    categories = scrape_category_hierarchy_products(
+        "https://example.com/ua/groot", fetch=fake_fetch
+    )
+
+    assert visited == [
+        "https://example.com/ua/groot",
+        "https://example.com/ua/groot",
+        "https://example.com/ua/g1-coffee",
+        "https://example.com/ua/g1-coffee",
+        "https://example.com/ua/c10-manual",
+        "https://example.com/ua/c10-manual",
+        "https://example.com/ua/c20-accessories",
+        "https://example.com/ua/c20-accessories",
+        "https://example.com/ua/g2-kettles",
+        "https://example.com/ua/g2-kettles",
+        "https://example.com/ua/g2-kettles?page=2",
+    ]
+
+    assert categories == [
+        Category(
+            name="Coffee makers / Manual grinders",
+            products=[Product(name="Hand Grinder A", price="100 ₴", url="/p1")],
+        ),
+        Category(
+            name="Coffee makers / Accessories",
+            products=[Product(name="Cleaning Brush", price="50 ₴", url="/p2")],
+        ),
+        Category(
+            name="Kettles / Electric kettles",
+            products=[
+                Product(name="Kettle X", price="500 ₴", url="/p3"),
+                Product(name="Kettle Y", price="550 ₴", url="/p4"),
+            ],
+        ),
     ]
 
