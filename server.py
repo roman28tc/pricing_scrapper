@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import html
+from collections import deque
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 try:  # pragma: no cover - optional dependency that may not be installed in tests
@@ -29,6 +32,233 @@ USER_AGENT = (
 
 REQUEST_TIMEOUT_SECONDS = 20
 REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
+
+MAX_PAGINATION_PAGES = 20
+
+
+@dataclass
+class _PaginationLink:
+    href: str
+    text: str
+    attrs: dict[str, str]
+
+
+class _PaginationLinkParser(HTMLParser):
+    """Collect anchors from an HTML document."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[_PaginationLink] = []
+        self._current_attrs: dict[str, str] | None = None
+        self._current_text_parts: list[str] = []
+        self._nested_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        if tag == "a":
+            attr_dict = {name.lower(): value for name, value in attrs if value is not None}
+            href = attr_dict.get("href")
+            if not href:
+                self._current_attrs = None
+                self._current_text_parts = []
+                self._nested_depth = 0
+                return
+            self._current_attrs = attr_dict
+            self._current_text_parts = []
+            self._nested_depth = 0
+        elif self._current_attrs is not None:
+            self._nested_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        if self._current_attrs is None:
+            return
+        if tag == "a" and self._nested_depth == 0:
+            href = self._current_attrs.get("href")
+            if href:
+                text = "".join(self._current_text_parts).strip()
+                self.links.append(
+                    _PaginationLink(href=href, text=text, attrs=self._current_attrs.copy())
+                )
+            self._current_attrs = None
+            self._current_text_parts = []
+        elif tag == "a":
+            if self._nested_depth > 0:
+                self._nested_depth -= 1
+        elif self._nested_depth > 0:
+            self._nested_depth -= 1
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if self._current_attrs is not None and data:
+            self._current_text_parts.append(data)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        if tag == "a":
+            self.handle_starttag(tag, attrs)
+            self.handle_endtag(tag)
+
+
+_PAGINATION_TEXT_HINTS = {
+    "next",
+    "next page",
+    "следующая",
+    "следующая страница",
+    "след.",
+    "weiter",
+    "suivant",
+    "далі",
+}
+
+_PAGINATION_ARROW_TEXTS = {">", "»", "›", "→"}
+
+_PAGINATION_HREF_HINTS = (
+    "page=",
+    "paged=",
+    "pagination",
+    "per_page=",
+    "p=",
+    "offset=",
+    "start=",
+    "page/",
+)
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlsplit(url)
+    normalized = parsed._replace(fragment="")
+    # Ensure that paths like ``""`` and ``"/"`` normalise consistently
+    path = normalized.path or "/"
+    return urlunsplit((normalized.scheme, normalized.netloc, path, normalized.query, ""))
+
+
+def _looks_like_pagination_link(link: _PaginationLink, absolute_url: str) -> bool:
+    text_lower = link.text.strip().casefold()
+    attrs_lower = " ".join(link.attrs.get(name, "") for name in ("rel", "class", "aria-label", "title"))
+    attrs_lower = attrs_lower.casefold()
+
+    if text_lower in _PAGINATION_TEXT_HINTS:
+        return True
+
+    if text_lower in _PAGINATION_ARROW_TEXTS and (
+        "next" in attrs_lower or "page" in attrs_lower or "pagination" in attrs_lower
+    ):
+        return True
+
+    href_lower = link.href.casefold()
+    if any(marker in href_lower for marker in _PAGINATION_HREF_HINTS):
+        return True
+
+    if "next" in attrs_lower:
+        return True
+
+    compact_text = text_lower.replace(" ", "")
+    if compact_text.isdigit():
+        if any(marker in href_lower for marker in _PAGINATION_HREF_HINTS):
+            return True
+        if "page" in attrs_lower or "pagination" in attrs_lower:
+            return True
+        parsed = urlsplit(absolute_url)
+        path_parts = [segment for segment in parsed.path.split("/") if segment]
+        if any(part.casefold().startswith("page") for part in path_parts):
+            return True
+        query_params = parse_qs(parsed.query)
+        for values in query_params.values():
+            if any(value.isdigit() for value in values):
+                return True
+
+    return False
+
+
+def _discover_pagination_urls(html_text: str, page_url: str) -> list[str]:
+    parser = _PaginationLinkParser()
+    parser.feed(html_text)
+    parser.close()
+
+    base = urlsplit(page_url)
+    base_netloc = base.netloc.casefold()
+    base_scheme = base.scheme
+    base_normalized = _normalize_url(page_url)
+
+    discovered: list[str] = []
+    seen: set[str] = set()
+
+    for link in parser.links:
+        href = link.href.strip()
+        if not href or href.startswith("#"):
+            continue
+        href_lower = href.casefold()
+        if href_lower.startswith(("javascript:", "mailto:", "tel:")):
+            continue
+        absolute = urljoin(page_url, href)
+        parsed = urlsplit(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if parsed.netloc.casefold() != base_netloc:
+            continue
+        if not parsed.scheme:
+            parsed = parsed._replace(scheme=base_scheme)
+        normalized = _normalize_url(urlunsplit(parsed))
+        if normalized == base_normalized:
+            continue
+        if normalized in seen:
+            continue
+        if not _looks_like_pagination_link(link, normalized):
+            continue
+        seen.add(normalized)
+        discovered.append(normalized)
+
+    return discovered
+
+
+def _collect_paginated_pages(start_url: str, *, limit: int = MAX_PAGINATION_PAGES) -> list[tuple[str, str]]:
+    queue: deque[str] = deque([start_url])
+    queued: set[str] = {_normalize_url(start_url)}
+    visited: set[str] = set()
+    pages: list[tuple[str, str]] = []
+
+    while queue and len(visited) < limit:
+        current = queue.popleft()
+        normalized_current = _normalize_url(current)
+        queued.discard(normalized_current)
+        if normalized_current in visited:
+            continue
+
+        html_text = fetch(current)
+        pages.append((current, html_text))
+        visited.add(normalized_current)
+
+        if len(visited) >= limit:
+            continue
+
+        for candidate in _discover_pagination_urls(html_text, current):
+            normalized_candidate = _normalize_url(candidate)
+            if normalized_candidate in visited or normalized_candidate in queued:
+                continue
+            if len(visited) + len(queued) >= limit:
+                continue
+            queue.append(candidate)
+            queued.add(normalized_candidate)
+
+    return pages
+
+
+def scrape_site(url: str, *, limit: int = MAX_PAGINATION_PAGES) -> tuple[list[PriceResult], int]:
+    pages = _collect_paginated_pages(url, limit=limit)
+    results: list[PriceResult] = []
+    seen: set[tuple[str, str]] = set()
+
+    for _page_url, html_text in pages:
+        for item in extract_prices(html_text):
+            key = (item.description, item.price)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+
+    return results, len(pages)
+
+
+def _format_summary(product_count: int, page_count: int) -> str:
+    page_word = "page" if page_count == 1 else "pages"
+    return f"{product_count} products have been scrapped from {page_count} {page_word}"
 
 
 def fetch(url: str) -> str:
@@ -83,7 +313,12 @@ def validate_url(value: str) -> str:
     return parsed.geturl()
 
 
-def render_page(url: str = "", error: str | None = None, results: list[PriceResult] | None = None) -> bytes:
+def render_page(
+    url: str = "",
+    error: str | None = None,
+    results: list[PriceResult] | None = None,
+    summary: str | None = None,
+) -> bytes:
     rows = ""
     if results:
         for item in results:
@@ -97,6 +332,7 @@ def render_page(url: str = "", error: str | None = None, results: list[PriceResu
         rows = '<tr><td colspan="2">No prices were detected on the page.</td></tr>'
 
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    summary_html = f'<p class="summary">{html.escape(summary)}</p>' if summary else ""
 
     page = f"""
     <!doctype html>
@@ -148,6 +384,10 @@ def render_page(url: str = "", error: str | None = None, results: list[PriceResu
             color: #d32f2f;
             margin-bottom: 1rem;
           }}
+          .summary {{
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+          }}
         </style>
       </head>
       <body>
@@ -158,6 +398,7 @@ def render_page(url: str = "", error: str | None = None, results: list[PriceResu
           <button type="submit">Scrape</button>
         </form>
         {error_html}
+        {summary_html}
         <table>
           <thead>
             <tr><th>Description</th><th>Price</th></tr>
@@ -178,15 +419,16 @@ class ScraperHandler(BaseHTTPRequestHandler):
         url = query.get("url", [""])[0]
         results = None
         error = None
+        summary = None
         if url:
             try:
                 validated = validate_url(url)
-                html_text = fetch(validated)
-                results = extract_prices(html_text)
+                results, page_count = scrape_site(validated)
+                summary = _format_summary(len(results), page_count)
             except (ValueError, URLError, HTTPError) as exc:
                 error = str(exc)
 
-        body = render_page(url=url, error=error, results=results)
+        body = render_page(url=url, error=error, results=results, summary=summary)
         self._send_response(body)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -197,14 +439,16 @@ class ScraperHandler(BaseHTTPRequestHandler):
 
         error = None
         results = None
-        try:
-            validated = validate_url(url)
-            html_text = fetch(validated)
-            results = extract_prices(html_text)
-        except (ValueError, URLError, HTTPError) as exc:
-            error = str(exc)
+        summary = None
+        if url:
+            try:
+                validated = validate_url(url)
+                results, page_count = scrape_site(validated)
+                summary = _format_summary(len(results), page_count)
+            except (ValueError, URLError, HTTPError) as exc:
+                error = str(exc)
 
-        body = render_page(url=url, error=error, results=results)
+        body = render_page(url=url, error=error, results=results, summary=summary)
         self._send_response(body)
 
     def _send_response(self, body: bytes) -> None:
