@@ -137,3 +137,93 @@ def test_playwright_timeout_fallback(monkeypatch):
     assert page.wait_calls == [
         ("networkidle", max(server.REQUEST_TIMEOUT_MS // 2, 1))
     ]
+
+
+def test_scrape_site_follows_pagination(monkeypatch):
+    import importlib
+
+    server = importlib.reload(importlib.import_module("server"))
+
+    pages = {
+        "https://example.com/products": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Item One</span>
+                  <span class='price'>$10.00</span>
+                </div>
+                <nav class='pagination'>
+                  <a href='/products?page=2' class='next'>Next</a>
+                </nav>
+              </body>
+            </html>
+        """,
+        "https://example.com/products?page=2": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Item Two</span>
+                  <span class='price'>$12.50</span>
+                </div>
+              </body>
+            </html>
+        """,
+    }
+
+    fetched: list[str] = []
+
+    def fake_fetch(url: str) -> str:
+        fetched.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(server, "fetch", fake_fetch)
+
+    results, page_count = server.scrape_site("https://example.com/products")
+
+    assert page_count == 2
+    assert {item.price for item in results} == {"$10.00", "$12.50"}
+    assert fetched == [
+        "https://example.com/products",
+        "https://example.com/products?page=2",
+    ]
+
+
+def test_scrape_site_without_pagination(monkeypatch):
+    import importlib
+
+    server = importlib.reload(importlib.import_module("server"))
+
+    pages = {
+        "https://example.com/products": """
+            <html>
+              <body>
+                <div class='item'>
+                  <span class='name'>Solo Item</span>
+                  <span class='price'>$8.00</span>
+                </div>
+              </body>
+            </html>
+        """,
+    }
+
+    monkeypatch.setattr(server, "fetch", lambda url: pages[url])
+
+    results, page_count = server.scrape_site("https://example.com/products")
+
+    assert page_count == 1
+    assert {item.price for item in results} == {"$8.00"}
+
+
+def test_format_summary():
+    import importlib
+
+    server = importlib.reload(importlib.import_module("server"))
+
+    assert (
+        server._format_summary(5, 1)
+        == "5 products have been scrapped from 1 page"
+    )
+    assert (
+        server._format_summary(3, 4)
+        == "3 products have been scrapped from 4 pages"
+    )
